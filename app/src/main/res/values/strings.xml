@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">LaylaPro</string>
+    <string name="accessibility_service_description">LaylaPro использует специальные возможности, чтобы по вашей команде находить и нажимать элементы в других приложениях (без root-доступа).</string>
+    <string name="foreground_service_channel_name">LaylaPro — фоновая работа</string>
+    <string name="foreground_service_notification_title">LaylaPro активна</string>
+    <string name="foreground_service_notification_text">Когнитивное ядро и память работают в фоне</string>
+</resources>
