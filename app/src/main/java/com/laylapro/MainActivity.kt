@@ -24,24 +24,17 @@ import com.laylapro.ui.settings.SettingsScreen
 import com.laylapro.ui.theme.LaylaProTheme
 import com.laylapro.util.SecureStorage
 
-/**
- * Точка входа UI. Запускает Final Integration Layer (Foreground Service, модуль 20)
- * и показывает чат поверх AI Core, собранного в [LaylaApplication].
- */
 class MainActivity : ComponentActivity() {
-
     companion object {
-        /** Заполняется [com.laylapro.text.ChatActivity] при выборе "Обсудить с LaylaPro" в системном меню. */
         const val EXTRA_PREFILLED_MESSAGE = "com.laylapro.EXTRA_PREFILLED_MESSAGE"
     }
 
     private val requestNotificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* результат не критичен: без разрешения сервис всё равно работает, просто без уведомления */ }
+    ) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         ensureNotificationPermission()
         startForegroundServiceCompat()
 
@@ -71,11 +64,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startForegroundServiceCompat() {
         val intent = Intent(this, LaylaForegroundService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
     }
 }
 
@@ -89,7 +78,6 @@ private fun LaylaProApp(
     prefilledMessage: String? = null,
 ) {
     var screen by remember { mutableStateOf(Screen.CHAT) }
-
     val chatViewModel: ChatViewModel = viewModel(
         factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
@@ -97,17 +85,11 @@ private fun LaylaProApp(
         }
     )
 
-    // Пришли из системного меню "Обработать текст" -> "Обсудить с LaylaPro" (см. text/ChatActivity).
-    androidx.compose.runtime.LaunchedEffect(prefilledMessage) {
-        if (!prefilledMessage.isNullOrBlank()) {
-            chatViewModel.sendMessage(prefilledMessage)
-        }
-    }
-
     when (screen) {
         Screen.CHAT -> ChatScreen(
             viewModel = chatViewModel,
             onOpenSettings = { screen = Screen.SETTINGS },
+            prefilledMessage = prefilledMessage,
         )
         Screen.SETTINGS -> SettingsScreen(
             secureStorage = secureStorage,

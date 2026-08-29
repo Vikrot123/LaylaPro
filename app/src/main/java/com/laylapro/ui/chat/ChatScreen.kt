@@ -42,14 +42,19 @@ import androidx.compose.ui.unit.dp
 fun ChatScreen(
     viewModel: ChatViewModel,
     onOpenSettings: () -> Unit,
+    prefilledMessage: String? = null,
 ) {
-    var input by remember { mutableStateOf("") }
+    var input by remember { mutableStateOf(prefilledMessage.orEmpty()) }
     val listState = rememberLazyListState()
 
+    // PROCESS_TEXT is an external input source. It may prefill the editor, but it
+    // never auto-submits: only an explicit press of Send starts Runtime/AI execution.
+    LaunchedEffect(prefilledMessage) {
+        if (!prefilledMessage.isNullOrBlank()) input = prefilledMessage
+    }
+
     LaunchedEffect(viewModel.messages.size) {
-        if (viewModel.messages.isNotEmpty()) {
-            listState.animateScrollToItem(viewModel.messages.size - 1)
-        }
+        if (viewModel.messages.isNotEmpty()) listState.animateScrollToItem(viewModel.messages.size - 1)
     }
 
     Scaffold(
@@ -71,17 +76,13 @@ fun ChatScreen(
         bottomBar = {
             Surface(shadowElevation = 8.dp) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     OutlinedTextField(
                         value = input,
                         onValueChange = { input = it },
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(end = 8.dp),
+                        modifier = Modifier.weight(1f).padding(end = 8.dp),
                         placeholder = { Text("Напишите LaylaPro...") },
                         singleLine = true,
                     )
@@ -89,8 +90,11 @@ fun ChatScreen(
                         CircularProgressIndicator(modifier = Modifier.size(32.dp))
                     } else {
                         IconButton(onClick = {
-                            viewModel.sendMessage(input)
-                            input = ""
+                            val message = input
+                            if (message.isNotBlank()) {
+                                viewModel.sendMessage(message)
+                                input = ""
+                            }
                         }) {
                             Icon(Icons.Filled.Send, contentDescription = "Отправить")
                         }
@@ -115,9 +119,7 @@ fun ChatScreen(
                 contentPadding = PaddingValues(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(viewModel.messages) { message ->
-                    ChatBubble(message)
-                }
+                items(viewModel.messages) { message -> ChatBubble(message) }
             }
         }
     }
@@ -126,22 +128,11 @@ fun ChatScreen(
 @Composable
 private fun ChatBubble(message: ChatUiMessage) {
     val alignment = if (message.isUser) Alignment.CenterEnd else Alignment.CenterStart
-    val bubbleColor = if (message.isUser) {
-        MaterialTheme.colorScheme.primary
-    } else {
-        MaterialTheme.colorScheme.secondaryContainer
-    }
-    val textColor = if (message.isUser) {
-        MaterialTheme.colorScheme.onPrimary
-    } else {
-        MaterialTheme.colorScheme.onSecondaryContainer
-    }
+    val bubbleColor = if (message.isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer
+    val textColor = if (message.isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
 
     Box(modifier = Modifier.fillMaxWidth(), contentAlignment = alignment) {
-        Surface(
-            color = bubbleColor,
-            shape = RoundedCornerShape(16.dp),
-        ) {
+        Surface(color = bubbleColor, shape = RoundedCornerShape(16.dp)) {
             Text(
                 text = message.text,
                 color = textColor,
