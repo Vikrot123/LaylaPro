@@ -1,16 +1,17 @@
 package com.laylapro.runtime
 
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import java.util.UUID
 
-/**
- * Workflow Engine (Том 98): "Исполняет последовательности действий. Каждый Workflow
- * представляет собой направленный граф (DAG)... Workflow считается завершённым
- * только после успешного выполнения всех узлов."
- */
-data class RetryPolicy(val maxAttempts: Int = 1, val backoffMs: Long = 200)
+data class RetryPolicy(val maxAttempts: Int = 1, val backoffMs: Long = 200) {
+    init {
+        require(maxAttempts >= 1) { "maxAttempts must be at least 1" }
+        require(backoffMs >= 0) { "backoffMs must not be negative" }
+    }
+}
 
 data class WorkflowNode(
     val nodeId: String,
@@ -20,9 +21,15 @@ data class WorkflowNode(
     val dependencies: List<String> = emptyList(),
     val timeoutMs: Long = 15_000,
     val retryPolicy: RetryPolicy = RetryPolicy(),
-    /** Действие для отката, если workflow прервался ПОСЛЕ успешного выполнения этого узла. */
     val rollbackAction: String? = null,
-)
+) {
+    init {
+        require(nodeId.isNotBlank()) { "workflow node id must not be blank" }
+        require(module.isNotBlank()) { "workflow module must not be blank" }
+        require(action.isNotBlank()) { "workflow action must not be blank" }
+        require(timeoutMs > 0) { "workflow timeoutMs must be positive" }
+    }
+}
 
 data class Workflow(
     val workflowId: UUID = UUID.randomUUID(),
@@ -40,22 +47,23 @@ sealed class WorkflowOutcome {
     ) : WorkflowOutcome()
 }
 
-/**
- * Топологически исполняет узлы workflow через [Dispatcher] (единственная точка
- * входа для вызова модулей — см. Dispatcher). Независимые узлы без общих
- * зависимостей выполняются параллельно (`coroutineScope { async { ... } }`).
- */
 class WorkflowEngine(private val dispatcher: Dispatcher) {
 
     suspend fun execute(workflow: Workflow): WorkflowOutcome {
+        validationError(workflow)?.let { error ->
+            return WorkflowOutcome.Failed(
+                failedNodeId = "validation",
+                error = error,
+                partialResults = emptyMap(),
+                rolledBack = emptyList(),
+            )
+        }
+
         val nodesById = workflow.nodes.associateBy { it.nodeId }
         val results = mutableMapOf<String, CommandResult>()
         val executedOrder = mutableListOf<String>()
         val remaining = workflow.nodes.map { it.nodeId }.toMutableSet()
 
-        // Простой уровневый топологический обход: на каждой итерации выполняем
-        // все узлы, чьи зависимости уже выполнены, — это и даёт параллелизм
-        // независимым веткам DAG без явного построения уровней заранее.
         while (remaining.isNotEmpty()) {
             val ready = remaining.filter { id ->
                 nodesById.getValue(id).dependencies.all { dep -> dep !in remaining }
@@ -64,16 +72,15 @@ class WorkflowEngine(private val dispatcher: Dispatcher) {
             if (ready.isEmpty()) {
                 return WorkflowOutcome.Failed(
                     failedNodeId = remaining.first(),
-                    error = "Обнаружен цикл или недостижимая зависимость в DAG: $remaining",
+                    error = "Обнаружен цикл в DAG: $remaining",
                     partialResults = results,
                     rolledBack = emptyList(),
                 )
             }
 
             val levelResults = coroutineScope {
-                ready.map { nodeId ->
-                    async { nodeId to runNode(nodesById.getValue(nodeId)) }
-                }.map { it.await() }
+                ready.map { nodeId -> async { nodeId to runNode(nodesById.getValue(nodeId)) } }
+                    .awaitAll()
             }
 
             for ((nodeId, result) in levelResults) {
@@ -96,28 +103,32 @@ class WorkflowEngine(private val dispatcher: Dispatcher) {
         return WorkflowOutcome.Success(results)
     }
 
+    private fun validationError(workflow: Workflow): String? {
+        val ids = workflow.nodes.map { it.nodeId }
+        if (ids.toSet().size != ids.size) return "Workflow содержит дублирующиеся nodeId"
+        val known = ids.toSet()
+        workflow.nodes.forEach { node ->
+            if (node.nodeId in node.dependencies) return "Узел '${node.nodeId}' зависит сам от себя"
+            val missing = node.dependencies.filterNot { it in known }
+            if (missing.isNotEmpty()) return "Узел '${node.nodeId}' ссылается на отсутствующие зависимости: $missing"
+        }
+        return null
+    }
+
     private suspend fun runNode(node: WorkflowNode): CommandResult {
         var lastResult: CommandResult? = null
         var attempt = 0
         while (attempt < node.retryPolicy.maxAttempts) {
             attempt++
             lastResult = dispatcher.dispatch(
-                Command(
-                    targetModule = node.module,
-                    action = node.action,
-                    params = node.parameters,
-                    timeoutMs = node.timeoutMs,
-                )
+                Command(node.module, node.action, node.parameters, node.timeoutMs)
             )
             if (lastResult.success) return lastResult
-            if (attempt < node.retryPolicy.maxAttempts) {
-                delay(node.retryPolicy.backoffMs * attempt)
-            }
+            if (attempt < node.retryPolicy.maxAttempts) delay(node.retryPolicy.backoffMs * attempt)
         }
-        return lastResult ?: CommandResult(success = false, error = "Узел '${node.nodeId}' не выполнился ни разу")
+        return lastResult ?: CommandResult(false, error = "Узел '${node.nodeId}' не выполнился ни разу")
     }
 
-    /** Откатывает уже успешно выполненные узлы в обратном порядке, если workflow прервался. */
     private suspend fun rollback(
         executedOrder: List<String>,
         nodesById: Map<String, WorkflowNode>,
@@ -126,9 +137,7 @@ class WorkflowEngine(private val dispatcher: Dispatcher) {
         for (nodeId in executedOrder.asReversed()) {
             val node = nodesById.getValue(nodeId)
             val rollbackAction = node.rollbackAction ?: continue
-            val outcome = dispatcher.dispatch(
-                Command(targetModule = node.module, action = rollbackAction, params = node.parameters)
-            )
+            val outcome = dispatcher.dispatch(Command(node.module, rollbackAction, node.parameters))
             if (outcome.success) rolledBack.add(nodeId)
         }
         return rolledBack
