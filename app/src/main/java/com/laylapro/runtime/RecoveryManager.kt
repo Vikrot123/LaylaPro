@@ -2,26 +2,22 @@ package com.laylapro.runtime
 
 import com.laylapro.core.CoreEvent
 import com.laylapro.core.EventBus
+import kotlinx.coroutines.CancellationException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * Recovery Manager (Том 98): "При возникновении ошибки Runtime обязан:
- * зафиксировать событие; сохранить состояние; перезапустить модуль;
- * повторить выполнение задачи; при невозможности восстановления уведомить пользователя.
- * Runtime никогда не завершает работу полностью при отказе одного модуля."
- */
 fun interface Restartable {
-    /** Сбрасывает внутреннее состояние модуля. Не должен бросать исключения. */
     fun restart()
 }
 
-/** Слушатель, которого RuntimeManager/UI регистрирует, чтобы получать пользовательские уведомления. */
 fun interface UnrecoverableFailureListener {
     fun onUnrecoverable(moduleName: String, lastError: String?)
 }
 
 class RecoveryManager(private val maxAttemptsBeforeDegraded: Int = 3) {
+    init {
+        require(maxAttemptsBeforeDegraded > 0) { "maxAttemptsBeforeDegraded must be positive" }
+    }
 
     private val restartables = ConcurrentHashMap<String, Restartable>()
     private val failureCounts = ConcurrentHashMap<String, AtomicInteger>()
@@ -38,7 +34,6 @@ class RecoveryManager(private val maxAttemptsBeforeDegraded: Int = 3) {
 
     fun isDegraded(moduleName: String): Boolean = moduleName in degraded
 
-    /** Вызывается диспетчером/watchdog при исключении или зависании модуля. Возвращает номер попытки. */
     fun recordFailure(moduleName: String, cause: Throwable?): Int {
         val counter = failureCounts.getOrPut(moduleName) { AtomicInteger(0) }
         val attempt = counter.incrementAndGet()
@@ -51,41 +46,45 @@ class RecoveryManager(private val maxAttemptsBeforeDegraded: Int = 3) {
                     "Превышено число попыток восстановления ($maxAttemptsBeforeDegraded). Последняя ошибка: ${cause?.message}",
                 )
             )
-            // "При невозможности восстановления уведомить пользователя" — но НЕ завершать работу.
             unrecoverableListener?.onUnrecoverable(moduleName, cause?.message)
             return attempt
         }
 
-        val restartable = restartables[moduleName]
-        if (restartable != null) {
-            runCatching { restartable.restart() }
-            EventBus.tryPublish(CoreEvent.ModuleRestarted(moduleName, attempt))
+        restartables[moduleName]?.let { restartable ->
+            try {
+                restartable.restart()
+                EventBus.tryPublish(CoreEvent.ModuleRestarted(moduleName, attempt))
+            } catch (e: Exception) {
+                EventBus.tryPublish(
+                    CoreEvent.ErrorOccurred(
+                        "RecoveryManager",
+                        "Перезапуск модуля '$moduleName' не удался: ${e.message ?: "unknown error"}",
+                    )
+                )
+            }
         }
         return attempt
     }
 
-    /** Сбрасывает счётчик ошибок после успешного вызова — модуль считается "здоровым" снова. */
     fun recordSuccess(moduleName: String) {
         failureCounts[moduleName]?.set(0)
         degraded.remove(moduleName)
     }
 
-    /**
-     * "Повторить выполнение задачи": оборачивает suspend-действие ретраями с
-     * экспоненциальной задержкой, ограниченными [Task.maxRetries].
-     */
     suspend fun <T> retryTask(task: Task, action: suspend () -> T): Result<T> {
         var lastError: Throwable? = null
         var attempt = 0
         while (attempt <= task.maxRetries) {
             try {
                 return Result.success(action())
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 lastError = e
                 task.retryCount = ++attempt
                 recordFailure(task.ownerModule, e)
                 if (attempt <= task.maxRetries) {
-                    kotlinx.coroutines.delay(200L * attempt) // простой backoff
+                    kotlinx.coroutines.delay(200L * attempt)
                 }
             }
         }

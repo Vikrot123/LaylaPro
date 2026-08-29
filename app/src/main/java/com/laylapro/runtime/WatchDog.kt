@@ -2,20 +2,15 @@ package com.laylapro.runtime
 
 import com.laylapro.core.CoreEvent
 import com.laylapro.core.EventBus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * WatchDog (Том 98): "Интервал проверки — 1000 мс. Контролируются: AI Core, Memory,
- * Planning, Reasoning, Voice, Vision, Android Integration, API Layer, Plugins,
- * Synchronization, Monitoring, Security. При отсутствии ответа модуль переводится
- * в состояние RECOVERY."
- */
 fun interface HealthCheck {
     suspend fun ping(): Boolean
 }
@@ -31,12 +26,10 @@ class WatchDog(
     private val lastHeartbeat = ConcurrentHashMap<String, Long>()
     private var job: Job? = null
 
-    /** Все модули, перечисленные в ТЗ, которые WatchDog обязан контролировать. */
     companion object {
         val CORE_MONITORED_MODULES = listOf(
             "AICore", "Memory", "Planning", "Reasoning", "Voice", "Vision", "DeviceControl",
-            "AndroidIntegration", "ApiLayer", "Plugins", "Synchronization",
-            "Monitoring", "Security",
+            "AndroidIntegration", "ApiLayer", "Plugins", "Synchronization", "Monitoring", "Security",
         )
     }
 
@@ -74,6 +67,8 @@ class WatchDog(
         for ((module, check) in checks) {
             val healthy = try {
                 withTimeoutOrNull(timeoutMs) { check.ping() } ?: false
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 false
             }

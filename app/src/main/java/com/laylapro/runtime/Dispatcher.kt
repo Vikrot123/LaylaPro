@@ -2,19 +2,10 @@ package com.laylapro.runtime
 
 import com.laylapro.core.CoreEvent
 import com.laylapro.core.EventBus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * Dispatcher (Том 98): "Все запросы проходят исключительно через Dispatcher.
- * Запрещается вызывать методы других модулей напрямую."
- *
- * Определяет модуль-исполнитель, очередь выполнения (через [Scheduler]/[TaskQueue]
- * выше по стеку), необходимость ожидания результата и таймаут выполнения.
- *
- * Пример из документа:
- *   "Открой Telegram" -> Dispatcher -> Android Integration -> Accessibility -> Результат -> Dispatcher -> AI Core
- */
 data class Command(
     val targetModule: String,
     val action: String,
@@ -37,7 +28,6 @@ class Dispatcher(
     private val recoveryManager: RecoveryManager,
     private val moduleRegistry: ModuleRegistry? = null,
 ) {
-
     private val handlers = ConcurrentHashMap<String, ModuleHandler>()
 
     fun register(moduleName: String, handler: ModuleHandler) {
@@ -52,16 +42,13 @@ class Dispatcher(
 
     suspend fun dispatch(command: Command): CommandResult {
         val handler = handlers[command.targetModule]
-            ?: return CommandResult(
-                success = false,
-                error = "Модуль '${command.targetModule}' не зарегистрирован в Dispatcher",
-            )
+            ?: return CommandResult(false, error = "Модуль '${command.targetModule}' не зарегистрирован в Dispatcher")
 
         if (moduleRegistry?.isRegistered(command.targetModule) == false) {
-            return CommandResult(
-                success = false,
-                error = "Модуль '${command.targetModule}' не прошёл регистрацию в Module Registry",
-            )
+            return CommandResult(false, error = "Модуль '${command.targetModule}' не прошёл регистрацию в Module Registry")
+        }
+        if (moduleRegistry != null && !moduleRegistry.dependenciesSatisfied(command.targetModule)) {
+            return CommandResult(false, error = "Зависимости модуля '${command.targetModule}' не готовы")
         }
 
         EventBus.tryPublish(CoreEvent.TaskStarted(taskId = "-", module = command.targetModule))
@@ -69,26 +56,19 @@ class Dispatcher(
         return try {
             val result = withTimeoutOrNull(command.timeoutMs) { handler.handle(command) }
             if (result == null) {
-                EventBus.tryPublish(
-                    CoreEvent.TaskTimedOut(taskId = "-", module = command.targetModule, timeoutMs = command.timeoutMs)
-                )
+                EventBus.tryPublish(CoreEvent.TaskTimedOut("-", command.targetModule, command.timeoutMs))
                 recoveryManager.recordFailure(command.targetModule, RuntimeException("timeout ${command.timeoutMs}мс"))
-                CommandResult(success = false, error = "Таймаут выполнения (${command.timeoutMs}мс)", timedOut = true)
+                CommandResult(false, error = "Таймаут выполнения (${command.timeoutMs}мс)", timedOut = true)
             } else {
                 if (result.success) recoveryManager.recordSuccess(command.targetModule)
                 result
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             val attempt = recoveryManager.recordFailure(command.targetModule, e)
-            EventBus.tryPublish(
-                CoreEvent.TaskFailed(
-                    taskId = "-",
-                    module = command.targetModule,
-                    error = e.message ?: "unknown error",
-                    attempt = attempt,
-                )
-            )
-            CommandResult(success = false, error = e.message ?: "Ошибка модуля ${command.targetModule}")
+            EventBus.tryPublish(CoreEvent.TaskFailed("-", command.targetModule, e.message ?: "unknown error", attempt))
+            CommandResult(false, error = e.message ?: "Ошибка модуля ${command.targetModule}")
         }
     }
 }

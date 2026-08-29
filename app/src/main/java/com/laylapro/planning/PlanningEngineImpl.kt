@@ -5,15 +5,6 @@ import com.laylapro.router.RoutingConstraints
 import com.laylapro.router.TaskCategory
 import kotlinx.coroutines.CancellationException
 
-/**
- * Реализация Planning Engine с настоящим Function Calling (Anthropic tool use),
- * теперь через [ModelRouter]: планирование требует именно tool-use, поэтому запрос
- * идёт с `RoutingConstraints(requiresToolUse = true)` — Model Router обязан выбрать
- * движок, который это умеет (сейчас единственный такой — облачный Claude).
- *
- * Если модель не запросила ни одного инструмента — возвращается тривиальный
- * план из одного шага "ответить пользователю через Conversation Engine".
- */
 class PlanningEngineImpl(
     private val modelRouter: ModelRouter,
 ) : PlanningEngine {
@@ -21,10 +12,10 @@ class PlanningEngineImpl(
     override suspend fun buildPlan(goal: String, availableTools: List<ToolDefinition>): TaskGraph {
         val systemPrompt = """
             Ты — модуль планирования (Planning Engine) внутри AI-ассистента LaylaPro.
-            Если запрос пользователя требует реального действия на устройстве (переключить
-            Wi-Fi, открыть настройки, нажать на элемент в другом приложении) — вызови
-            соответствующий инструмент. Если это обычный вопрос или разговор — не вызывай
-            ничего, просто ответь текстом.
+            Если запрос пользователя требует реального действия на устройстве — вызови
+            соответствующий инструмент. Если это обычный вопрос — не вызывай инструмент.
+            Вызов инструмента не означает разрешение пользователя на опасное действие:
+            execution layer отдельно применяет safety/confirmation policy.
         """.trimIndent()
 
         val response = try {
@@ -36,9 +27,9 @@ class PlanningEngineImpl(
                 maxTokens = 400,
             )
         } catch (e: CancellationException) {
-            throw e // Патч 1: не проглатывать отмену корутины вместе с обычными ошибками
+            throw e
         } catch (e: Exception) {
-            null // Деградация: при ошибке Function Calling (или отсутствии подходящего движка) уходим в обычный чат-ответ
+            null
         }
 
         val toolSteps = response?.toolCalls?.mapNotNull { call ->
@@ -48,6 +39,7 @@ class PlanningEngineImpl(
                 moduleName = entry.moduleName,
                 action = entry.action,
                 params = call.input,
+                requiresUserConfirmation = entry.requiresUserConfirmation,
             )
         }.orEmpty()
 
@@ -64,27 +56,24 @@ class PlanningEngineImpl(
             )
         }
 
-        // Финальный шаг "ответить пользователю" зависит от успешного выполнения всех
-        // инструментов — AI Core соберёт их результаты в контекст перед генерацией ответа.
-        val respondStep = TaskStep(
-            id = "step-respond",
-            moduleName = "ConversationEngine",
-            action = "respond",
-            params = mapOf("goal" to goal),
-            dependsOn = toolSteps.map { it.id },
+        return TaskGraph(
+            steps = toolSteps + TaskStep(
+                id = "step-respond",
+                moduleName = "ConversationEngine",
+                action = "respond",
+                params = mapOf("goal" to goal),
+                dependsOn = toolSteps.map { it.id },
+            )
         )
-
-        return TaskGraph(steps = toolSteps + respondStep)
     }
 
     override suspend fun modifyPlanOnFailure(
         failedStepId: String,
         error: String,
         currentGraph: TaskGraph,
-    ): TaskGraph {
-        val updatedSteps = currentGraph.steps.map { step ->
+    ): TaskGraph = currentGraph.copy(
+        steps = currentGraph.steps.map { step ->
             if (step.id == failedStepId) step.copy(status = StepStatus.FAILED) else step
         }
-        return currentGraph.copy(steps = updatedSteps)
-    }
+    )
 }
