@@ -41,16 +41,7 @@ import okhttp3.sse.EventSources
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-/**
- * Модуль 15 (API Layer) — клиент Anthropic Claude Messages API.
- *
- * Документация: https://docs.claude.com/en/api/messages
- * Модель по умолчанию: claude-sonnet-5 (актуальная на момент написания;
- * при необходимости смотри Anthropic Model overview на предмет более новых ID).
- *
- * ВАЖНО: ключ API никогда не хардкодится — берётся из [SecureStorage]
- * (Android Keystore-backed EncryptedSharedPreferences, см. Security Layer в ТЗ).
- */
+/** Anthropic Messages API implementation of [ApiLayer]. */
 class AnthropicApiClient(
     private val secureStorage: SecureStorage,
     private val model: String = DEFAULT_MODEL,
@@ -64,7 +55,11 @@ class AnthropicApiClient(
         private const val RETRY_BASE_DELAY_MS = 500L
     }
 
-    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val json = Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+        explicitNulls = false
+    }
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -78,7 +73,7 @@ class AnthropicApiClient(
         @SerialName("max_tokens") val maxTokens: Int,
         val system: String,
         val messages: List<AnthropicMessage>,
-        val temperature: Float,
+        val temperature: Float? = null,
         val stream: Boolean = false,
     )
 
@@ -103,6 +98,13 @@ class AnthropicApiClient(
                 "API-ключ Anthropic не задан. Откройте Настройки в приложении и укажите ключ " +
                     "(console.anthropic.com -> API Keys)."
             )
+
+    /**
+     * Claude Sonnet 5 rejects non-default sampling parameters. The public [ApiLayer]
+     * keeps temperature for provider neutrality, but this provider omits it for Sonnet 5.
+     */
+    private fun supportedTemperature(requested: Float): Float? =
+        if (model == "claude-sonnet-5") null else requested
 
     private fun buildRequest(body: AnthropicRequest): Request {
         val payload = json.encodeToString(AnthropicRequest.serializer(), body)
@@ -134,9 +136,7 @@ class AnthropicApiClient(
                 lastError = e
             }
 
-            if (attempt < MAX_ATTEMPTS) {
-                delay(RETRY_BASE_DELAY_MS * attempt)
-            }
+            if (attempt < MAX_ATTEMPTS) delay(RETRY_BASE_DELAY_MS * attempt)
         }
 
         throw ApiLayerException(
@@ -159,8 +159,7 @@ class AnthropicApiClient(
                 maxTokens = maxTokens,
                 system = systemPrompt,
                 messages = listOf(AnthropicMessage(role = "user", content = userMessage)),
-                temperature = temperature,
-                stream = false,
+                temperature = supportedTemperature(temperature),
             )
         )
 
@@ -219,7 +218,7 @@ class AnthropicApiClient(
             put("model", model)
             put("max_tokens", maxTokens)
             put("system", systemPrompt)
-            put("temperature", temperature.toDouble())
+            supportedTemperature(temperature)?.let { put("temperature", it.toDouble()) }
             putJsonArray("messages") {
                 addJsonObject {
                     put("role", "user")
@@ -245,7 +244,6 @@ class AnthropicApiClient(
 
             val root = json.parseToJsonElement(bodyStr).jsonObject
             val contentArray = (root["content"] as? JsonArray) ?: JsonArray(emptyList())
-
             var text: String? = null
             val toolCalls = mutableListOf<ToolCall>()
 
@@ -289,7 +287,7 @@ class AnthropicApiClient(
                 maxTokens = maxTokens,
                 system = systemPrompt,
                 messages = listOf(AnthropicMessage(role = "user", content = userMessage)),
-                temperature = temperature,
+                temperature = supportedTemperature(temperature),
                 stream = true,
             )
         )
@@ -328,8 +326,7 @@ class AnthropicApiClient(
                 maxTokens = 1,
                 system = "",
                 messages = listOf(AnthropicMessage(role = "user", content = "Hi")),
-                temperature = 0f,
-                stream = false,
+                temperature = supportedTemperature(0f),
             )
         )
         try {
