@@ -1,19 +1,14 @@
 name: Build LaylaPro APK
 
-# Собирает debug-APK в облаке GitHub — не требует Android Studio и не требует
-# gradle-wrapper.jar (используется предустановленный Gradle из GitHub Actions).
-#
-# Как использовать:
-#   1. Создайте пустой репозиторий на github.com и запушьте туда содержимое этой папки.
-#   2. Откройте вкладку Actions в репозитории — сборка запустится автоматически.
-#   3. Когда сборка позеленеет, откройте её и скачайте артефакт "LaylaPro-debug-apk"
-#      внизу страницы — внутри лежит app-debug.apk, готовый к установке на телефон.
-#
-# Также можно запустить вручную: вкладка Actions -> Build LaylaPro APK -> Run workflow.
-
 on:
   push:
-    branches: [ "main", "master" ]
+    branches:
+      - main
+      - master
+      - "stabilization/**"
+  pull_request:
+    branches:
+      - main
   workflow_dispatch: {}
 
 jobs:
