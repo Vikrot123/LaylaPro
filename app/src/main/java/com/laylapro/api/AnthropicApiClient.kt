@@ -60,9 +60,6 @@ class AnthropicApiClient(
         const val DEFAULT_MODEL = "claude-sonnet-5"
         private const val BASE_URL = "https://api.anthropic.com/v1/messages"
         private const val ANTHROPIC_VERSION = "2023-06-01"
-
-        // Патч 2: retry только для временных ошибок (сетевой сбой, 429, 5xx) — НЕ для
-        // ошибок аутентификации/некорректного запроса, повтор которых бессмыслен.
         private const val MAX_ATTEMPTS = 3
         private const val RETRY_BASE_DELAY_MS = 500L
     }
@@ -118,13 +115,6 @@ class AnthropicApiClient(
             .build()
     }
 
-    /**
-     * Патч 2: безопасный retry ТОЛЬКО для временных ошибок — сетевой сбой (IOException,
-     * например обрыв соединения/DNS/таймаут) и HTTP 429/5xx (перегрузка/временная
-     * недоступность сервера). НЕ повторяет запрос при 4xx, кроме 429 (400/401/403 и т.п. —
-     * не временные, повтор ничего не изменит и только зря потратит время/квоту).
-     * Не меняет публичный контракт [ApiLayer] — используется только внутри этого класса.
-     */
     private suspend fun executeWithRetry(request: Request): Response {
         var lastError: Throwable? = null
 
@@ -132,18 +122,20 @@ class AnthropicApiClient(
             try {
                 val response = httpClient.newCall(request).executeSuspend()
                 if (response.isSuccessful || !isTransientHttpError(response.code)) {
-                    return response // успех ИЛИ окончательная (не временная) ошибка — не повторяем
+                    return response
                 }
-                lastError = ApiLayerException("Anthropic API временная ошибка ${response.code} (попытка $attempt/$MAX_ATTEMPTS)")
+                lastError = ApiLayerException(
+                    "Anthropic API временная ошибка ${response.code} (попытка $attempt/$MAX_ATTEMPTS)"
+                )
                 response.close()
             } catch (e: CancellationException) {
-                throw e // Патч 1: отмену корутины никогда не проглатываем, в том числе внутри retry-цикла
+                throw e
             } catch (e: IOException) {
-                lastError = e // сетевой сбой — считаем временным, пробуем ещё раз
+                lastError = e
             }
 
             if (attempt < MAX_ATTEMPTS) {
-                delay(RETRY_BASE_DELAY_MS * attempt) // небольшой линейный backoff: 500мс, затем 1000мс
+                delay(RETRY_BASE_DELAY_MS * attempt)
             }
         }
 
@@ -175,7 +167,9 @@ class AnthropicApiClient(
         executeWithRetry(request).use { response ->
             val bodyStr = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                val parsedError = runCatching { json.decodeFromString(AnthropicResponse.serializer(), bodyStr) }.getOrNull()
+                val parsedError = runCatching {
+                    json.decodeFromString(AnthropicResponse.serializer(), bodyStr)
+                }.getOrNull()
                 throw ApiLayerException(
                     "Anthropic API ошибка ${response.code}: ${parsedError?.error?.message ?: bodyStr}"
                 )
@@ -206,12 +200,16 @@ class AnthropicApiClient(
                                     put("type", spec.type)
                                     put("description", spec.description)
                                     spec.enumValues?.let { values ->
-                                        putJsonArray("enum") { values.forEach { add(it) } }
+                                        putJsonArray("enum") {
+                                            values.forEach { add(JsonPrimitive(it)) }
+                                        }
                                     }
                                 }
                             }
                         }
-                        putJsonArray("required") { tool.required.forEach { add(it) } }
+                        putJsonArray("required") {
+                            tool.required.forEach { add(JsonPrimitive(it)) }
+                        }
                     }
                 }
             }
@@ -270,7 +268,6 @@ class AnthropicApiClient(
         }
     }
 
-    /** Плоское преобразование JsonElement -> Kotlin-примитив/List/Map для input тул-вызова. */
     private fun jsonElementToAny(element: JsonElement): Any? = when (element) {
         is JsonNull -> null
         is JsonArray -> element.map { jsonElementToAny(it) }
@@ -324,12 +321,6 @@ class AnthropicApiClient(
         awaitClose { eventSource.cancel() }
     }.flowOn(Dispatchers.IO)
 
-    /**
-     * Патч 4: лёгкая проверка работоспособности сохранённого ключа — минимальный запрос
-     * (max_tokens=1), чтобы не тратить впустую квоту пользователя. Намеренно НЕ использует
-     * [executeWithRetry]: невалидный ключ не станет валидным после повтора, а лишняя задержка
-     * ухудшит отклик экрана настроек, где пользователь ждёт немедленного результата.
-     */
     suspend fun validateApiKey(): ApiKeyValidationResult = withContext(Dispatchers.IO) {
         val request = buildRequest(
             AnthropicRequest(
@@ -352,7 +343,7 @@ class AnthropicApiClient(
                 }
             }
         } catch (e: CancellationException) {
-            throw e // Патч 1: отмену корутины (например, уход с экрана настроек) не проглатываем
+            throw e
         } catch (e: IOException) {
             ApiKeyValidationResult.NoInternet
         } catch (e: Exception) {
@@ -361,7 +352,6 @@ class AnthropicApiClient(
     }
 }
 
-/** Патч 4: результат проверки ключа — ровно те исходы, которые запрошены явно. */
 sealed class ApiKeyValidationResult {
     object Valid : ApiKeyValidationResult()
     object InvalidKey : ApiKeyValidationResult()
@@ -371,7 +361,6 @@ sealed class ApiKeyValidationResult {
     data class Unknown(val message: String) : ApiKeyValidationResult()
 }
 
-/** Небольшой suspend-обёртка над OkHttp Call, чтобы не тянуть отдельную корутин-либу. */
 private suspend fun Call.executeSuspend(): Response = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
     enqueue(object : Callback {
         override fun onFailure(call: Call, e: IOException) {
